@@ -1,0 +1,10 @@
+{
+  "name": "cli",
+  "version": "0.1.0",
+  "entrypoint": "main.ecko",
+  "description": "Command-line argument parsing for Ecko: typed flags, options, positionals, defaults, and generated usage. Pure - no capabilities.",
+  "author": "Sean Nieuwoudt <sean@underwulf.com>",
+  "license": "MIT",
+  "capabilities": [],
+  "dependencies": {}
+}

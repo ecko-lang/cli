@@ -1,0 +1,18 @@
+# cli demo. Normally you'd pass os.args(); a fixed argv keeps output deterministic.
+import "./main.ecko"
+cli = main
+
+spec = cli.parser("greet", "print a friendly greeting")
+    |> cli.flag("--loud", "shout it")
+    |> cli.opt("--count", { kind: "int", default: 1, help: "repeat N times" })
+    |> cli.arg("name", { required: true })
+
+args = cli.parse(spec, ["--loud", "--count", "2", "Ada"])
+greeting = if args.loud { "HELLO, {args.name}!" } else { "Hello, {args.name}." }
+mut i = 0
+while i < args.count {
+    print(greeting)
+    i = i + 1
+}
+print("")
+print(cli.usage(spec))

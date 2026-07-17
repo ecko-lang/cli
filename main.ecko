@@ -1,0 +1,166 @@
+# cli - command-line argument parsing for Ecko.
+#
+#   import cli
+#   import std.os
+#
+#   spec = cli.parser("greet", "say hello")
+#     |> cli.flag("--loud", "shout it")
+#     |> cli.opt("--count", { kind: "int", default: 1 })
+#     |> cli.arg("name", { required: true })
+#
+#   args = cli.parse(spec, os.args())    # { loud, count, name }  (or raises)
+#   print(cli.usage(spec))               # generated help text
+#
+# Typed flags (bool), options (string/int/float/bool + defaults), and
+# positionals (required/optional). Pipeline-friendly: flag/opt/arg take the spec
+# and return a new one. Pure; no capabilities. Bad input raises a kind-"cli"
+# error (catch it to print usage and exit).
+
+# ---- helpers ---------------------------------------------------------------
+fn drop_n(l, n) = reverse(take(reverse(l), len(l) - n))
+
+fn strip_dashes(s) {
+    cs = chars(s)
+    mut i = 0
+    while i < len(cs) and cs[i] == "-" {
+        i = i + 1
+    }
+    join(drop_n(cs, i), "")
+}
+
+fn get_or(m, k, d) {
+    v = get(m, k)
+    if v == null { d } else { v }
+}
+
+fn add(spec, key, item) = insert(spec, key, push(get(spec, key), item))
+
+fn find_by(list, key, val) {
+    for item in list {
+        if get(item, key) == val { return item }
+    }
+    null
+}
+
+fn coerce(kind, s) {
+    if kind == "int" {
+        int(s)
+    } else if kind == "float" {
+        float(s)
+    } else if kind == "bool" {
+        s == "true"
+    } else {
+        s
+    }
+}
+
+fn fail(msg) = error({ kind: "cli", message: msg })
+
+# ---- building a parser -----------------------------------------------------
+export fn parser(name, description = "") = {
+    name: name,
+    description: description,
+    flags: [],
+    opts: [],
+    args: [],
+}
+
+export fn flag(spec, name, help = "") = add(spec, "flags", { name: name, help: help })
+
+export fn opt(spec, name, opts = empty_map()) = add(
+    spec,
+    "opts",
+    {
+        name: name,
+        kind: get_or(opts, "kind", "string"),
+        default: get(opts, "default"),
+        help: get_or(opts, "help", ""),
+    },
+)
+
+export fn arg(spec, name, opts = empty_map()) = add(
+    spec,
+    "args",
+    { name: name, required: get_or(opts, "required", false), help: get_or(opts, "help", "") },
+)
+
+# ---- parsing ---------------------------------------------------------------
+export fn parse(spec, argv) {
+    mut result = empty_map()
+    for f in spec.flags {
+        result = insert(result, strip_dashes(f.name), false)
+    }
+    for o in spec.opts {
+        result = insert(result, strip_dashes(o.name), o.default)
+    }
+    mut positional = []
+    mut i = 0
+    while i < len(argv) {
+        tok = argv[i]
+        if starts_with(tok, "--") {
+            eqparts = split(tok, "=")
+            name = eqparts[0]
+            inline = if len(eqparts) > 1 { join(drop_n(eqparts, 1), "=") } else { null }
+            key = strip_dashes(name)
+            fl = find_by(spec.flags, "name", name)
+            op = find_by(spec.opts, "name", name)
+            if fl != null { result = insert(result, key, true) } else if op != null {
+                val = if inline != null { inline } else {
+                    i = i + 1
+                    if i >= len(argv) { fail("option {name} needs a value") }
+                    argv[i]
+                }
+                result = insert(result, key, coerce(op.kind, val))
+            } else { fail("unknown option {name}") }
+        } else { positional = push(positional, tok) }
+        i = i + 1
+    }
+    if len(positional) > len(spec.args) { fail("too many arguments") }
+    mut j = 0
+    for a in spec.args {
+        if j < len(positional) {
+            result = insert(result, a.name, positional[j])
+        } else if a.required {
+            fail("missing required argument '{a.name}'")
+        } else {
+            result = insert(result, a.name, null)
+        }
+        j = j + 1
+    }
+    result
+}
+
+# ---- usage -----------------------------------------------------------------
+fn arg_names(spec) {
+    mut parts = []
+    for a in spec.args {
+        parts = push(parts, if a.required { "<{a.name}>" } else { "[{a.name}]" })
+    }
+    join(parts, " ")
+}
+
+export fn usage(spec) {
+    mut lines = [
+        "{spec.name} - {spec.description}",
+        "",
+        "Usage: {spec.name} [options] {arg_names(spec)}",
+    ]
+    if len(spec.flags) > 0 or len(spec.opts) > 0 {
+        lines = push(lines, "")
+        lines = push(lines, "Options:")
+        for f in spec.flags {
+            lines = push(lines, "  {f.name}  {f.help}")
+        }
+        for o in spec.opts {
+            lines = push(lines, "  {o.name} <{o.kind}>  {o.help}")
+        }
+    }
+    if len(spec.args) > 0 {
+        lines = push(lines, "")
+        lines = push(lines, "Arguments:")
+        for a in spec.args {
+            lines = push(lines, "  {a.name}  {a.help}")
+        }
+    }
+    join(lines, "\n")
+}
