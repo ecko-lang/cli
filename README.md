@@ -1,8 +1,7 @@
-# cli
+# CLI - Ecko Std Lib Package
 
 Command-line argument parsing for [Ecko](https://ecko.sh), written in Ecko:
-typed flags, options, positionals, defaults, and generated usage. Pure — no
-capabilities.
+typed flags, options, positionals, defaults, and generated usage.
 
 ## Install
 
@@ -47,4 +46,4 @@ ecko test tests/
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
