@@ -8,37 +8,37 @@ fn greeter() = cli.parser("greet", "say hello")
     |> cli.opt("--count", { kind: "int", default: 1, help: "how many times" })
     |> cli.arg("name", { required: true })
 
-test.case("parses flags, options, and positionals", || {
+test.case("parses flags, options, and positionals", fn() {
     a = cli.parse(greeter(), ["--loud", "--count", "3", "Ada"])
     test.eq(a.loud, true)
     test.eq(a.count, 3)
     test.eq(a.name, "Ada")
 })
 
-test.case("defaults apply when omitted", || {
+test.case("defaults apply when omitted", fn() {
     a = cli.parse(greeter(), ["Bob"])
     test.eq(a.loud, false)
     test.eq(a.count, 1)
     test.eq(a.name, "Bob")
 })
 
-test.case("--opt=value form and int coercion", || {
+test.case("--opt=value form and int coercion", fn() {
     a = cli.parse(greeter(), ["--count=5", "Cy"])
     test.eq(a.count, 5)
     test.eq(type_of(a.count), "int")
 })
 
-test.case("missing required positional raises", || {
+test.case("missing required positional raises", fn() {
     caught = try { cli.parse(greeter(), ["--loud"]) } catch (e) { get(e, "kind") }
     test.eq(caught, "cli")
 })
 
-test.case("unknown option raises", || {
+test.case("unknown option raises", fn() {
     caught = try { cli.parse(greeter(), ["--nope", "Ada"]) } catch (e) { get(e, "kind") }
     test.eq(caught, "cli")
 })
 
-test.case("usage lists the tool, options, and arguments", || {
+test.case("usage lists the tool, options, and arguments", fn() {
     u = cli.usage(greeter())
     test.ok(contains(u, "greet"), "tool name")
     test.ok(contains(u, "--count"), "option")

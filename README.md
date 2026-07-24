@@ -7,7 +7,7 @@ capabilities.
 ## Install
 
 ```bash
-ecko add https://github.com/ecko-sh/cli
+ecko get github.com/ecko-sh/cli
 ```
 
 ## Usage
