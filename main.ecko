@@ -57,6 +57,11 @@ fn coerce(kind, s) {
 fn fail(msg) = error({ kind: "cli", message: msg })
 
 # ---- building a parser -----------------------------------------------------
+## Start a command-line spec. Build it up with `flag`, `opt` and `arg`, then
+## hand it to `parse`.
+##
+## example:
+##   spec = parser("greet", "say hello")
 export fn parser(name, description = "") = {
     name: name,
     description: description,
@@ -65,8 +70,14 @@ export fn parser(name, description = "") = {
     args: [],
 }
 
+## Add a boolean flag: present on the command line means true.
+##
+## example:
+##   spec = flag(spec, "verbose", "print more")
 export fn flag(spec, name, help = "") = add(spec, "flags", { name: name, help: help })
 
+## Add a named option that takes a value (`--name value`). `opts` may carry
+## `help`, `default`, and `required`.
 export fn opt(spec, name, opts = empty_map()) = add(
     spec,
     "opts",
@@ -78,6 +89,8 @@ export fn opt(spec, name, opts = empty_map()) = add(
     },
 )
 
+## Add a positional argument, in declaration order. `opts` may carry `help`,
+## `default`, and `required`.
 export fn arg(spec, name, opts = empty_map()) = add(
     spec,
     "args",
@@ -85,6 +98,9 @@ export fn arg(spec, name, opts = empty_map()) = add(
 )
 
 # ---- parsing ---------------------------------------------------------------
+## Parse `argv` against a spec, returning a map of flags, options and
+## positional arguments. Raises with a usage message on unknown or missing
+## arguments.
 export fn parse(spec, argv) {
     mut result = empty_map()
     for f in spec.flags {
@@ -139,6 +155,8 @@ fn arg_names(spec) {
     join(parts, " ")
 }
 
+## The rendered `--help` text for a spec: description, usage line, then the
+## flags, options and positional arguments with their help strings.
 export fn usage(spec) {
     mut lines = [
         "{spec.name} - {spec.description}",
