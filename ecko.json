@@ -1,6 +1,6 @@
 {
-  "module": "github.com/ecko-sh/cli",
-  "version": "0.9.4",
+  "module": "github.com/ecko-lang/cli",
+  "version": "0.9.5",
   "entrypoint": "main.ecko",
   "description": "Command-line argument parsing for Ecko: typed flags, options, positionals, defaults, and generated usage. Pure - no capabilities.",
   "author": "Sean Nieuwoudt <sean@underwulf.com>",

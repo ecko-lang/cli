@@ -6,7 +6,7 @@ typed flags, options, positionals, defaults, and generated usage.
 ## Install
 
 ```bash
-ecko get github.com/ecko-sh/cli
+ecko get github.com/ecko-lang/cli
 ```
 
 ## Usage
