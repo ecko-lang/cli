@@ -1,8 +1,8 @@
 {
   "module": "github.com/ecko-lang/cli",
-  "version": "0.37.0",
+  "version": "1.0.0",
   "entrypoint": "main.ecko",
-  "description": "Command-line argument parsing for Ecko: typed flags, options, positionals, defaults, and generated usage. Pure - no capabilities.",
+  "description": "Declarative command-line parsing: options, short flags, positionals, subcommands, --help and usage text from one spec map. The std.cli module, as a package. Pure - no capabilities.",
   "author": "Sean Nieuwoudt <sean@underwulf.com>",
   "license": "MIT",
   "capabilities": [],

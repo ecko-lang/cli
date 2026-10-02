@@ -2,17 +2,24 @@
 import "./main.ecko"
 cli = main
 
-spec = cli.parser("greet", "print a friendly greeting")
-    |> cli.flag("--loud", "shout it")
-    |> cli.opt("--count", { kind: "int", default: 1, help: "repeat N times" })
-    |> cli.arg("name", { required: true })
+spec = {
+    name: "greet",
+    about: "print a friendly greeting",
+    options: [
+        { name: "loud", short: "l", flag: true, help: "shout it" },
+        { name: "count", short: "n", default: 1, help: "repeat N times" },
+    ],
+    args: [{ name: "name", required: true, help: "who to greet" }],
+}
 
-args = cli.parse(spec, ["--loud", "--count", "2", "Ada"])
-greeting = if args.loud { "HELLO, {args.name}!" } else { "Hello, {args.name}." }
-mut i = 0
-while i < args.count {
-    print(greeting)
-    i = i + 1
+r = cli.parse(spec, ["--loud", "-n", "2", "Ada"])
+if r.help { print(cli.help(spec)) } else {
+    greeting = if r.options.loud { "HELLO, {r.args.name}!" } else { "Hello, {r.args.name}." }
+    mut i = 0
+    while i < r.options.count {
+        print(greeting)
+        i = i + 1
+    }
 }
 print("")
-print(cli.usage(spec))
+print(cli.help(spec))

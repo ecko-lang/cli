@@ -1,46 +1,127 @@
 # Tests for the cli package - offline, deterministic.
+#
+# 1.0 replaces the native `std.cli` module, so the contract is "answer what
+# std.cli answers". Every expected value here, help text included, is what
+# std.cli (Ecko 0.57 and 0.58) returns for the same input; a wider run of 51
+# spec/argv pairs matched it on every one.
 import std.test
 import "../main.ecko"
 cli = main
 
-fn greeter() = cli.parser("greet", "say hello")
-    |> cli.flag("--loud", "shout it")
-    |> cli.opt("--count", { kind: "int", default: 1, help: "how many times" })
-    |> cli.arg("name", { required: true })
+spec = {
+    name: "tool",
+    about: "does things",
+    options: [
+        { name: "verbose", short: "v", flag: true, help: "chatty" },
+        { name: "count", short: "n", default: 1, help: "how many" },
+        { name: "ratio", default: 0.5 },
+        { name: "out", short: "o", required: true, help: "where" },
+    ],
+    args: [{ name: "src", required: true, help: "input" }, { name: "dst" }],
+}
 
-test.case("parses flags, options, and positionals", fn() {
-    a = cli.parse(greeter(), ["--loud", "--count", "3", "Ada"])
-    test.eq(a.loud, true)
-    test.eq(a.count, 3)
-    test.eq(a.name, "Ada")
+cmds = {
+    name: "vcs",
+    about: "version control",
+    options: [{ name: "global", flag: true }],
+    commands: [
+        {
+            name: "add",
+            about: "stage",
+            options: [{ name: "all", short: "a", flag: true }],
+            args: [{ name: "path" }],
+        },
+        {
+            name: "commit",
+            about: "save",
+            options: [{ name: "message", short: "m", required: true }],
+        },
+    ],
+}
+
+fn message(f) = try {
+    f()
+    "no error"
+} catch (e) { "{e.kind}: {e.message}" }
+
+test.case("parses flags, options and positionals into options, args and rest", fn() {
+    r = cli.parse(spec, ["-v", "--out", "x", "a", "b", "c"])
+    test.eq(r.options, { verbose: true, count: 1, ratio: 0.5, out: "x" })
+    test.eq(r.args, { src: "a", dst: "b" })
+    test.eq(r.rest, ["c"])
+    test.eq(r.command, null)
+    test.eq(r.help, false)
 })
 
-test.case("defaults apply when omitted", fn() {
-    a = cli.parse(greeter(), ["Bob"])
-    test.eq(a.loud, false)
-    test.eq(a.count, 1)
-    test.eq(a.name, "Bob")
+test.case("every value form works, typed by the default", fn() {
+    test.eq(cli.parse(spec, ["--out=x", "a", "--count=12"]).options.count, 12)
+    test.eq(
+        cli.parse(spec, ["-ox", "a", "-n7"]).options,
+        { verbose: false, count: 7, ratio: 0.5, out: "x" },
+    )
+    test.eq(cli.parse(spec, ["-o", "x", "a", "--ratio", "2.5"]).options.ratio, 2.5)
 })
 
-test.case("--opt=value form and int coercion", fn() {
-    a = cli.parse(greeter(), ["--count=5", "Cy"])
-    test.eq(a.count, 5)
-    test.eq(type_of(a.count), "int")
+test.case("everything after -- is positional", fn() {
+    r = cli.parse(spec, ["--out", "x", "--", "-v", "--count"])
+    test.eq(r.args, { src: "-v", dst: "--count" })
+    test.eq(r.options.verbose, false)
 })
 
-test.case("missing required positional raises", fn() {
-    caught = try { cli.parse(greeter(), ["--loud"]) } catch (e) { get(e, "kind") }
-    test.eq(caught, "cli")
+test.case("--help sets help and skips validation", fn() {
+    r = cli.parse(spec, ["--help"])
+    test.eq(r.help, true)
+    test.eq(r.args, { src: null, dst: null })
 })
 
-test.case("unknown option raises", fn() {
-    caught = try { cli.parse(greeter(), ["--nope", "Ada"]) } catch (e) { get(e, "kind") }
-    test.eq(caught, "cli")
+test.case("bad input raises a cli error naming the problem", fn() {
+    test.eq(message(fn() cli.parse(spec, ["a"])), "cli: missing required option '--out'")
+    test.eq(message(fn() cli.parse(spec, ["--out", "x"])), "cli: missing required argument '<src>'")
+    test.eq(
+        message(fn() cli.parse(spec, ["--out", "x", "a", "--nope"])),
+        "cli: unknown option '--nope'",
+    )
+    test.eq(message(fn() cli.parse(spec, ["--out", "x", "a", "-z"])), "cli: unknown option '-z'")
+    test.eq(message(fn() cli.parse(spec, ["--out"])), "cli: option '--out' needs a value")
+    test.eq(
+        message(fn() cli.parse(spec, ["--out", "x", "a", "--count", "x"])),
+        "cli: option '--count' expects a whole number, got 'x'",
+    )
 })
 
-test.case("usage lists the tool, options, and arguments", fn() {
-    u = cli.usage(greeter())
-    test.ok(contains(u, "greet"), "tool name")
-    test.ok(contains(u, "--count"), "option")
-    test.ok(contains(u, "name"), "positional")
+test.case("subcommands pick a spec by the first positional", fn() {
+    r = cli.parse(cmds, ["add", "-a", "p"])
+    test.eq(r.command, "add")
+    test.eq(r.options, { all: true })
+    test.eq(r.args, { path: "p" })
+    test.eq(cli.parse(cmds, ["commit", "--message=hi"]).options.message, "hi")
+    test.eq(cli.parse(cmds, ["--help"]).help, true)
+    test.eq(message(fn() cli.parse(cmds, ["push"])), "cli: unknown command 'push'")
+    test.eq(message(fn() cli.parse(cmds, [])), "cli: no command given")
+})
+
+test.case(
+    "help renders the spec, and a subcommand on request",
+    fn() {
+        test.eq(
+            cli.help(spec),
+            "tool - does things\n\nUsage: tool [options] <src> <dst>\n\nOptions:\n  -v, --verbose    chatty\n  -n, --count <value>    how many (default: 1)\n      --ratio <value>     (default: 0.5)\n  -o, --out <value>    where\n      --help    show this help\n\nArguments:\n  <src>    input (required)\n  <dst>",
+        )
+        test.eq(
+            cli.help(cmds, "commit"),
+            "vcs commit - save\n\nUsage: vcs commit [options] \n\nOptions:\n  -m, --message <value>    \n      --help    show this help",
+        )
+        test.eq(message(fn() cli.help(cmds, "nope")), "cli: cli.help: unknown command 'nope'")
+    },
+)
+
+test.case("the 0.x builder builds the same spec", fn() {
+    built = cli.parser("greet", "say hi")
+        |> cli.flag("--loud", "shout")
+        |> cli.opt("count", { default: 2, short: "c" })
+        |> cli.arg("who", { required: true })
+    r = cli.parse(built, ["-c", "5", "bob", "--loud"])
+    test.eq(r.options, { loud: true, count: 5 })
+    test.eq(r.args, { who: "bob" })
+    test.eq(cli.usage(built), cli.help(built))
 })

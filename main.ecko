@@ -1,184 +1,324 @@
-# cli - command-line argument parsing for Ecko.
+# cli - declarative command-line parsing for Ecko.
 #
 #   import cli
 #   import std.os
 #
-#   spec = cli.parser("greet", "say hello")
-#     |> cli.flag("--loud", "shout it")
-#     |> cli.opt("--count", { kind: "int", default: 1 })
-#     |> cli.arg("name", { required: true })
+#   spec = {
+#       name: "greet",
+#       about: "say hello",
+#       options: [
+#           { name: "loud", short: "l", flag: true, help: "shout it" },
+#           { name: "count", short: "n", default: 1, help: "how many times" },
+#       ],
+#       args: [{ name: "who", required: true }],
+#   }
+#   r = cli.parse(spec, os.args())
+#   if r.help { print(cli.help(spec)) }
+#   r.options.count    # an Int, because the default is one
 #
-#   args = cli.parse(spec, os.args())    # { loud, count, name }  (or raises)
-#   print(cli.usage(spec))               # generated help text
-#
-# Typed flags (bool), options (string/int/float/bool + defaults), and
-# positionals (required/optional). Pipeline-friendly: flag/opt/arg take the spec
-# and return a new one. Pure; no capabilities. Bad input raises a kind-"cli"
-# error (catch it to print usage and exit).
+# 1.0 is the `std.cli` native module, rewritten in Ecko so it can leave the
+# standard library (board card 66d8a29d): the same spec, the same result
+# `{ options, args, rest, command, help }`, the same help text - checked
+# against the native module, see tests/cli_test.ecko. The 0.x builder
+# functions (`parser`, `flag`, `opt`, `arg`, `usage`) remain, and now build
+# that same spec. Bad input raises `{ kind: "cli", message }`; catch it to
+# print usage and exit. Pure; no capabilities.
+
+import std.str
 
 # ---- helpers ---------------------------------------------------------------
-fn drop_n(l, n) = reverse(take(reverse(l), len(l) - n))
 
-fn strip_dashes(s) {
-    cs = chars(s)
-    mut i = 0
-    while i < len(cs) and cs[i] == "-" {
-        i = i + 1
-    }
-    join(drop_n(cs, i), "")
+fn fail(message) = error({ kind: "cli", message: message })
+
+fn list_of(spec, key) {
+    v = get(spec, key)
+    if type_of(v) == "list" { filter(v, fn(x) type_of(x) == "map") } else { [] }
 }
 
-fn get_or(m, k, d) {
-    v = get(m, k)
-    if v == null { d } else { v }
+fn text_of(m, key) {
+    v = get(m, key)
+    if type_of(v) == "string" { v } else { null }
 }
 
-fn add(spec, key, item) = insert(spec, key, push(get(spec, key), item))
+fn truthy(m, key) {
+    v = get(m, key)
+    not (v == null or v == false or v == 0 or v == "")
+}
 
-fn find_by(list, key, val) {
-    for item in list {
-        if get(item, key) == val { return item }
+fn find_by(items, key, want) {
+    for it in items {
+        if text_of(it, key) == want { return it }
     }
     null
 }
 
-fn coerce(kind, s) {
-    if kind == "int" {
-        int(s)
-    } else if kind == "float" {
-        float(s)
-    } else if kind == "bool" {
-        s == "true"
-    } else {
-        s
+# A raw option value, typed by the option's default: an Int default makes it
+# an Int, a Float default a Float, anything else leaves it a String.
+fn coerce(raw, default, name) {
+    match type_of(default) {
+        "int" => try { int(trim(raw)) } catch (_) { fail("option '--{name}' expects a whole number, got '{raw}'") }
+        "float" => try { float(trim(raw)) } catch (_) { fail("option '--{name}' expects a number, got '{raw}'") }
+        _ => raw
     }
 }
 
-fn fail(msg) = error({ kind: "cli", message: msg })
-
-# ---- building a parser -----------------------------------------------------
-## Start a command-line spec. Build it up with `flag`, `opt` and `arg`, then
-## hand it to `parse`.
-##
-## example:
-##   spec = parser("greet", "say hello")
-export fn parser(name, description = "") = {
-    name: name,
-    description: description,
-    flags: [],
-    opts: [],
-    args: [],
-}
-
-## Add a boolean flag: present on the command line means true.
-##
-## example:
-##   spec = flag(spec, "verbose", "print more")
-export fn flag(spec, name, help = "") = add(spec, "flags", { name: name, help: help })
-
-## Add a named option that takes a value (`--name value`). `opts` may carry
-## `help`, `default`, and `required`.
-export fn opt(spec, name, opts = empty_map()) = add(
-    spec,
-    "opts",
-    {
-        name: name,
-        kind: get_or(opts, "kind", "string"),
-        default: get(opts, "default"),
-        help: get_or(opts, "help", ""),
-    },
-)
-
-## Add a positional argument, in declaration order. `opts` may carry `help`,
-## `default`, and `required`.
-export fn arg(spec, name, opts = empty_map()) = add(
-    spec,
-    "args",
-    { name: name, required: get_or(opts, "required", false), help: get_or(opts, "help", "") },
-)
-
-# ---- parsing ---------------------------------------------------------------
-## Parse `argv` against a spec, returning a map of flags, options and
-## positional arguments. Raises with a usage message on unknown or missing
-## arguments.
-export fn parse(spec, argv) {
-    mut result = empty_map()
-    for f in spec.flags {
-        result = insert(result, strip_dashes(f.name), false)
+# Parse `args` against one level of spec: its options and positionals.
+fn parse_flat(spec, args) {
+    opts = list_of(spec, "options")
+    # Every option is present in the result, with its default (a flag's is
+    # false), so `r.options.x` never misses.
+    mut options = {}
+    for o in opts {
+        name = text_of(o, "name")
+        if name != null {
+            d = get(o, "default")
+            options = insert(options, name, if truthy(o, "flag") { d ?? false } else { d })
+        }
     }
-    for o in spec.opts {
-        result = insert(result, strip_dashes(o.name), o.default)
-    }
-    mut positional = []
+    mut positionals = []
+    mut help = false
     mut i = 0
-    while i < len(argv) {
-        tok = argv[i]
-        if starts_with(tok, "--") {
-            eqparts = split(tok, "=")
-            name = eqparts[0]
-            inline = if len(eqparts) > 1 { join(drop_n(eqparts, 1), "=") } else { null }
-            key = strip_dashes(name)
-            fl = find_by(spec.flags, "name", name)
-            op = find_by(spec.opts, "name", name)
-            if fl != null { result = insert(result, key, true) } else if op != null {
-                val = if inline != null { inline } else {
+    n = len(args)
+    while i < n {
+        tok = args[i]
+        if tok == "--help" or tok == "-h" {
+            help = true
+            i = i + 1
+        } else if tok == "--" {
+            # Everything after `--` is positional.
+            positionals = positionals + args[i + 1..]
+            i = n
+        } else if starts_with(tok, "--") {
+            body = tok[2..]
+            eq = index_of(body, "=")
+            name = if eq >= 0 { body[..eq] } else { body }
+            o = find_by(opts, "name", name) ?? fail("unknown option '--{name}'")
+            if truthy(o, "flag") {
+                options = insert(options, name, true)
+                i = i + 1
+            } else {
+                mut raw = null
+                if eq >= 0 {
+                    raw = body[eq + 1..]
                     i = i + 1
-                    if i >= len(argv) { fail("option {name} needs a value") }
-                    argv[i]
-                }
-                result = insert(result, key, coerce(op.kind, val))
-            } else { fail("unknown option {name}") }
-        } else { positional = push(positional, tok) }
-        i = i + 1
-    }
-    if len(positional) > len(spec.args) { fail("too many arguments") }
-    mut j = 0
-    for a in spec.args {
-        if j < len(positional) {
-            result = insert(result, a.name, positional[j])
-        } else if a.required {
-            fail("missing required argument '{a.name}'")
+                } else if i + 1 < n {
+                    raw = args[i + 1]
+                    i = i + 2
+                } else { fail("option '--{name}' needs a value") }
+                options = insert(options, name, coerce(raw, get(o, "default"), name))
+            }
+        } else if len(tok) >= 2 and starts_with(tok, "-") {
+            c = tok[1..2]
+            o = find_by(opts, "short", c) ?? fail("unknown option '-{c}'")
+            name = text_of(o, "name") ?? c
+            if truthy(o, "flag") {
+                options = insert(options, name, true)
+                i = i + 1
+            } else {
+                attached = tok[2..]
+                mut raw = null
+                if attached != "" {
+                    raw = attached
+                    i = i + 1
+                } else if i + 1 < n {
+                    raw = args[i + 1]
+                    i = i + 2
+                } else { fail("option '-{c}' needs a value") }
+                options = insert(options, name, coerce(raw, get(o, "default"), name))
+            }
         } else {
-            result = insert(result, a.name, null)
+            positionals = push(positionals, tok)
+            i = i + 1
+        }
+    }
+    # Positionals bind to the declared args in order; the rest go to `rest`.
+    arg_specs = list_of(spec, "args")
+    mut named_args = {}
+    mut idx = 0
+    for a in arg_specs {
+        name = text_of(a, "name")
+        if name != null {
+            named_args = insert(
+                named_args,
+                name,
+                if idx < len(positionals) { positionals[idx] } else { null },
+            )
+        }
+        idx = idx + 1
+    }
+    rest = if len(positionals) > len(arg_specs) { positionals[len(arg_specs)..] } else { [] }
+    # `--help` skips validation, so a missing required value cannot hide it.
+    if not help {
+        for o in opts {
+            if truthy(o, "required") {
+                name = text_of(o, "name") ?? ""
+                if get(options, name) == null { fail("missing required option '--{name}'") }
+            }
+        }
+        mut k = 0
+        for a in arg_specs {
+            if truthy(a, "required") and k >= len(positionals) {
+                fail("missing required argument '<{text_of(a, "name") ?? ""}>'")
+            }
+            k = k + 1
+        }
+    }
+    { options: options, args: named_args, rest: rest, help: help }
+}
+
+fn strings(argv) = map(argv, fn(v) if type_of(v) == "string" { v } else { string(v) })
+
+# ---- parsing -------------------------------------------------------------
+
+## Parse `argv` - a list such as `os.args()` - against a spec map, returning
+## `{ options, args, rest, command, help }`.
+##
+## The spec is `{ name, about?, options?, args?, commands? }`. Each option is
+## `{ name, short?, flag?, default?, required?, help? }`: `--name value`,
+## `--name=value`, `-s value` and `-svalue` all work, a `flag` takes no value,
+## and the value is an Int or Float when the `default` is one. Each arg is
+## `{ name, required?, help? }`, bound in order; extra positionals, and
+## everything after `--`, land in `rest`. `--help` or `-h` sets `help` and
+## skips validation. With `commands` (a list of specs), the first positional
+## picks one and `command` names it.
+##
+## Bad input - an unknown option, a missing value, a missing required option
+## or argument, an unknown command - raises `{ kind: "cli", message }`.
+##
+## example:
+##   r = parse({ name: "x", options: [{ name: "n", default: 1 }] }, ["--n", "3"])
+##   r.options.n    # 3
+export fn parse(spec, argv) {
+    if type_of(spec) != "map" { fail("cli.parse needs a spec map as its first argument") }
+    if type_of(argv) != "list" {
+        fail("cli.parse needs a list of arguments as its second argument")
+    }
+    args = strings(argv)
+    if get(spec, "commands") == null { return insert(parse_flat(spec, args), "command", null) }
+    cmds = list_of(spec, "commands")
+    # The first non-option token picks the command; `--help` before it asks
+    # for the top-level help.
+    mut ci = -1
+    mut j = 0
+    for tok in args {
+        if ci < 0 {
+            if tok == "--help" or tok == "-h" {
+                return { options: {}, args: {}, rest: [], command: null, help: true }
+            }
+            if not starts_with(tok, "-") { ci = j }
         }
         j = j + 1
     }
-    result
+    if ci < 0 { fail("no command given") }
+    name = args[ci]
+    sub = find_by(cmds, "name", name) ?? fail("unknown command '{name}'")
+    insert(parse_flat(sub, args[ci + 1..]), "command", name)
 }
 
-# ---- usage -----------------------------------------------------------------
-fn arg_names(spec) {
-    mut parts = []
-    for a in spec.args {
-        parts = push(parts, if a.required { "<{a.name}>" } else { "[{a.name}]" })
+# ---- help text -------------------------------------------------------------
+
+fn help_text(spec) {
+    name = text_of(spec, "name") ?? "program"
+    mut out = []
+    about = text_of(spec, "about")
+    if about != null { out = push(out, "{name} - {about}\n") }
+    if get(spec, "commands") != null {
+        out = push(out, "Usage: {name} [options] <command> [args]")
+    } else {
+        names = map(
+            filter(list_of(spec, "args"), fn(a) text_of(a, "name") != null),
+            fn(a) "<{text_of(a, "name")}>",
+        )
+        # The native module trimmed only the argument list, so a spec with no
+        # args ends the line in a space; kept, so the text is identical.
+        out = push(out, "Usage: {name} [options] {str.trim_end(join(names, " "))}")
     }
-    join(parts, " ")
+    out = push(out, "\nOptions:")
+    for o in list_of(spec, "options") {
+        oname = text_of(o, "name") ?? ""
+        short = if text_of(o, "short") != null { "-{text_of(o, "short")}, " } else { "    " }
+        takes = if truthy(o, "flag") { "" } else { " <value>" }
+        h = text_of(o, "help") ?? ""
+        d = get(o, "default")
+        # An empty-string default means "nothing unless given".
+        def = if d == null or d == "" or truthy(o, "flag") { "" } else { " (default: {d})" }
+        out = push(out, "  {short}--{oname}{takes}    {h}{def}")
+    }
+    out = push(out, "      --help    show this help")
+    args = list_of(spec, "args")
+    if len(args) > 0 {
+        out = push(out, "\nArguments:")
+        for a in args {
+            req = if truthy(a, "required") { " (required)" } else { "" }
+            out = push(out, "  <{text_of(a, "name") ?? ""}>    {text_of(a, "help") ?? ""}{req}")
+        }
+    }
+    cmds = list_of(spec, "commands")
+    if len(cmds) > 0 {
+        out = push(out, "\nCommands:")
+        for c in cmds {
+            out = push(out, "  {text_of(c, "name") ?? ""}    {text_of(c, "about") ?? ""}")
+        }
+    }
+    str.trim_end(join(out, "\n"))
 }
 
-## The rendered `--help` text for a spec: description, usage line, then the
-## flags, options and positional arguments with their help strings.
-export fn usage(spec) {
-    mut lines = [
-        "{spec.name} - {spec.description}",
-        "",
-        "Usage: {spec.name} [options] {arg_names(spec)}",
-    ]
-    if len(spec.flags) > 0 or len(spec.opts) > 0 {
-        lines = push(lines, "")
-        lines = push(lines, "Options:")
-        for f in spec.flags {
-            lines = push(lines, "  {f.name}  {f.help}")
-        }
-        for o in spec.opts {
-            lines = push(lines, "  {o.name} <{o.kind}>  {o.help}")
-        }
-    }
-    if len(spec.args) > 0 {
-        lines = push(lines, "")
-        lines = push(lines, "Arguments:")
-        for a in spec.args {
-            lines = push(lines, "  {a.name}  {a.help}")
-        }
-    }
-    join(lines, "\n")
+## Usage text for a spec: the name and `about`, a usage line, then options,
+## arguments and commands with their help. Pass a command name - for example
+## the `command` of a `parse` result - for that subcommand's help; `null`
+## means the top level.
+##
+## example:
+##   if r.help { print(help(spec, r.command)) }
+export fn help(spec, command = null) {
+    if type_of(spec) != "map" { fail("cli.help needs a spec map") }
+    if command == null { return help_text(spec) }
+    if type_of(command) != "string" { fail("cli.help: the command must be a string") }
+    sub = find_by(list_of(spec, "commands"), "name", command) ??
+        fail("cli.help: unknown command '{command}'")
+    prog = text_of(spec, "name") ?? "program"
+    # Rendered as its own spec, named for the program and command together,
+    # without the top level's command list.
+    help_text(insert(remove(sub, "commands"), "name", "{prog} {command}"))
 }
+
+# ---- the 0.x builder, kept ---------------------------------------------------
+
+fn bare(name) = if starts_with(name, "--") { name[2..] } else { name }
+
+fn add(spec, key, item) = insert(spec, key, push(get(spec, key) ?? [], item))
+
+## Start a spec, to build up with `flag`, `opt` and `arg` and pass to `parse`.
+## The same as writing the map `{ name, about: description, options: [], args: [] }`.
+##
+## example:
+##   spec = parser("greet", "say hello") |> flag("loud", "shout it")
+export fn parser(name, description = "") = { name: name, about: description, options: [], args: [] }
+
+## Add a boolean flag, `--name`: present means true. A leading `--` on the
+## name is dropped.
+##
+## example:
+##   spec = flag(spec, "verbose", "print more")
+export fn flag(spec, name, help = "") = add(
+    spec,
+    "options",
+    { name: bare(name), flag: true, help: help },
+)
+
+## Add an option that takes a value, `--name value`. `opts` may carry `help`,
+## `default`, `required` and `short`; the value's type follows the default.
+##
+## example:
+##   spec = opt(spec, "count", { default: 1, help: "how many" })
+export fn opt(spec, name, opts = {}) = add(spec, "options", merge(opts, { name: bare(name) }))
+
+## Add a positional argument, bound in declaration order. `opts` may carry
+## `help` and `required`.
+##
+## example:
+##   spec = arg(spec, "name", { required: true })
+export fn arg(spec, name, opts = {}) = add(spec, "args", merge(opts, { name: name }))
+
+## The help text for a spec - the same as `help(spec)`, under its 0.x name.
+export fn usage(spec) = help(spec)
