@@ -1,39 +1,74 @@
 # cli
 
-## `parser(name, description = "")`
+## `parse(spec, argv)`
 
-Start a command-line spec. Build it up with `flag`, `opt` and `arg`, then
-hand it to `parse`.
+Parse `argv` - a list such as `os.args()` - against a spec map, returning
+`{ options, args, rest, command, help }`.
+
+The spec is `{ name, about?, options?, args?, commands? }`. Each option is
+`{ name, short?, flag?, default?, required?, help? }`: `--name value`,
+`--name=value`, `-s value` and `-svalue` all work, a `flag` takes no value,
+and the value is an Int or Float when the `default` is one. Each arg is
+`{ name, required?, help? }`, bound in order; extra positionals, and
+everything after `--`, land in `rest`. `--help` or `-h` sets `help` and
+skips validation. With `commands` (a list of specs), the first positional
+picks one and `command` names it.
+
+Bad input - an unknown option, a missing value, a missing required option
+or argument, an unknown command - raises `{ kind: "cli", message }`.
 
 ```ecko
-spec = parser("greet", "say hello")
+r = parse({ name: "x", options: [{ name: "n", default: 1 }] }, ["--n", "3"])
+r.options.n    # 3
+```
+
+## `help(spec, command = null)`
+
+Usage text for a spec: the name and `about`, a usage line, then options,
+arguments and commands with their help. Pass a command name - for example
+the `command` of a `parse` result - for that subcommand's help; `null`
+means the top level.
+
+```ecko
+if r.help { print(help(spec, r.command)) }
+```
+
+## `parser(name, description = "")`
+
+Start a spec, to build up with `flag`, `opt` and `arg` and pass to `parse`.
+The same as writing the map `{ name, about: description, options: [], args: [] }`.
+
+```ecko
+spec = parser("greet", "say hello") |> flag("loud", "shout it")
 ```
 
 ## `flag(spec, name, help = "")`
 
-Add a boolean flag: present on the command line means true.
+Add a boolean flag, `--name`: present means true. A leading `--` on the
+name is dropped.
 
 ```ecko
-spec = flag(spec, "verbose", "print more")
+spec = parser("tool") |> flag("verbose", "print more")
 ```
 
-## `opt(spec, name, opts = empty_map())`
+## `opt(spec, name, opts = {})`
 
-Add a named option that takes a value (`--name value`). `opts` may carry
-`help`, `default`, and `required`.
+Add an option that takes a value, `--name value`. `opts` may carry `help`,
+`default`, `required` and `short`; the value's type follows the default.
 
-## `arg(spec, name, opts = empty_map())`
+```ecko
+spec = parser("tool") |> opt("count", { default: 1, help: "how many" })
+```
 
-Add a positional argument, in declaration order. `opts` may carry `help`,
-`default`, and `required`.
+## `arg(spec, name, opts = {})`
 
-## `parse(spec, argv)`
+Add a positional argument, bound in declaration order. `opts` may carry
+`help` and `required`.
 
-Parse `argv` against a spec, returning a map of flags, options and
-positional arguments. Raises with a usage message on unknown or missing
-arguments.
+```ecko
+spec = parser("tool") |> arg("name", { required: true })
+```
 
 ## `usage(spec)`
 
-The rendered `--help` text for a spec: description, usage line, then the
-flags, options and positional arguments with their help strings.
+The help text for a spec - the same as `help(spec)`, under its 0.x name.

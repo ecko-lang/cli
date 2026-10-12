@@ -299,7 +299,7 @@ export fn parser(name, description = "") = { name: name, about: description, opt
 ## name is dropped.
 ##
 ## example:
-##   spec = flag(spec, "verbose", "print more")
+##   spec = parser("tool") |> flag("verbose", "print more")
 export fn flag(spec, name, help = "") = add(
     spec,
     "options",
@@ -310,14 +310,14 @@ export fn flag(spec, name, help = "") = add(
 ## `default`, `required` and `short`; the value's type follows the default.
 ##
 ## example:
-##   spec = opt(spec, "count", { default: 1, help: "how many" })
+##   spec = parser("tool") |> opt("count", { default: 1, help: "how many" })
 export fn opt(spec, name, opts = {}) = add(spec, "options", merge(opts, { name: bare(name) }))
 
 ## Add a positional argument, bound in declaration order. `opts` may carry
 ## `help` and `required`.
 ##
 ## example:
-##   spec = arg(spec, "name", { required: true })
+##   spec = parser("tool") |> arg("name", { required: true })
 export fn arg(spec, name, opts = {}) = add(spec, "args", merge(opts, { name: name }))
 
 ## The help text for a spec - the same as `help(spec)`, under its 0.x name.
