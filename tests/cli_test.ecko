@@ -92,7 +92,7 @@ test.case("bad input raises a cli error naming the problem", fn() {
 test.case("subcommands pick a spec by the first positional", fn() {
     r = cli.parse(cmds, ["add", "-a", "p"])
     test.eq(r.command, "add")
-    test.eq(r.options, { all: true })
+    test.eq(r.options, { all: true, global: false })
     test.eq(r.args, { path: "p" })
     test.eq(cli.parse(cmds, ["commit", "--message=hi"]).options.message, "hi")
     test.eq(cli.parse(cmds, ["--help"]).help, true)
@@ -124,4 +124,139 @@ test.case("the 0.x builder builds the same spec", fn() {
     test.eq(r.options, { loud: true, count: 5 })
     test.eq(r.args, { who: "bob" })
     test.eq(cli.usage(built), cli.help(built))
+})
+
+fn caught(f) = try {
+    f()
+    null
+} catch (e) { e }
+
+fn reason(f) {
+    e = caught(f)
+    if e == null { "no error" } else { "{get(e, "kind")}/{get(e, "reason")}" }
+}
+
+test.case("combined short flags cluster, and the first that takes a value ends the cluster", fn() {
+    r = cli.parse(spec, ["-vn5", "-o", "x", "a"])
+    test.eq(r.options.verbose, true)
+    test.eq(r.options.count, 5)
+    r2 = cli.parse(spec, ["-vo", "x", "a"])
+    test.eq(r2.options.out, "x")
+    test.eq(r2.options.verbose, true)
+    test.eq(message(fn() cli.parse(spec, ["-vz", "-o", "x", "a"])), "cli: unknown option '-z'")
+    test.eq(
+        message(fn() cli.parse(spec, ["-o", "x", "a", "-vn"])),
+        "cli: option '-n' needs a value",
+    )
+})
+
+test.case("a flag given a value is refused, and --no-<flag> turns one off", fn() {
+    test.eq(
+        message(fn() cli.parse(spec, ["--verbose=false", "-o", "x", "a"])),
+        "cli: option '--verbose' is a flag and takes no value",
+    )
+    test.eq(reason(fn() cli.parse(spec, ["--verbose=yes", "-o", "x", "a"])), "cli/flag_value")
+    on = { name: "t", options: [{ name: "color", flag: true, default: true }] }
+    test.eq(cli.parse(on, []).options.color, true)
+    test.eq(cli.parse(on, ["--no-color"]).options.color, false)
+    test.eq(cli.parse(on, ["--no-color", "--color"]).options.color, true)
+    test.eq(
+        message(fn() cli.parse(spec, ["--no-count", "-o", "x", "a"])),
+        "cli: unknown option '--no-count'",
+    )
+})
+
+test.case("an option named no-<x> is matched before negation", fn() {
+    s = { name: "t", options: [{ name: "x", flag: true }, { name: "no-x", flag: true }] }
+    test.eq(cli.parse(s, ["--no-x"]).options, { x: false, "no-x": true })
+})
+
+test.case("parent options before a subcommand are parsed and kept", fn() {
+    full = {
+        name: "vcs",
+        options: [{ name: "global", short: "g", flag: true }, { name: "config", default: "" }],
+        commands: [
+            { name: "add", options: [{ name: "all", flag: true }], args: [{ name: "path" }] },
+        ],
+    }
+    r = cli.parse(full, ["--global", "add", "p"])
+    test.eq(r.command, "add")
+    test.eq(r.options, { global: true, config: "", all: false })
+    test.eq(r.args, { path: "p" })
+    r2 = cli.parse(full, ["--config", "x.toml", "-g", "add", "--all"])
+    test.eq(r2.options, { global: true, config: "x.toml", all: true })
+    test.eq(cli.parse(full, ["add"]).options, { global: false, config: "", all: false })
+    test.eq(message(fn() cli.parse(full, ["--nope", "add"])), "cli: unknown option '--nope'")
+    test.eq(reason(fn() cli.parse(full, ["--config"])), "cli/missing_value")
+    test.eq(cli.parse(full, ["-g", "--help"]).help, true)
+    test.eq(cli.parse(full, ["--", "add", "p"]).args, { path: "p" })
+})
+
+test.case("a required parent option is enforced", fn() {
+    s = { name: "t", options: [{ name: "token", required: true }], commands: [{ name: "go" }] }
+    test.eq(message(fn() cli.parse(s, ["go"])), "cli: missing required option '--token'")
+    test.eq(cli.parse(s, ["--token", "k", "go"]).options.token, "k")
+    test.eq(cli.parse(s, ["go", "--help"]).help, true)
+})
+
+test.case("an option may claim -h; --help still asks for help", fn() {
+    s = { name: "t", options: [{ name: "host", short: "h" }] }
+    r = cli.parse(s, ["-h", "b"])
+    test.eq(r.options.host, "b")
+    test.eq(r.help, false)
+    test.eq(cli.parse(s, ["--help"]).help, true)
+    test.eq(cli.parse(spec, ["-h"]).help, true)
+})
+
+test.case("errors carry a stable reason", fn() {
+    test.eq(reason(fn() cli.parse(spec, ["a"])), "cli/missing_option")
+    test.eq(reason(fn() cli.parse(spec, ["--out", "x"])), "cli/missing_argument")
+    test.eq(reason(fn() cli.parse(spec, ["--nope"])), "cli/unknown_option")
+    test.eq(reason(fn() cli.parse(spec, ["--out"])), "cli/missing_value")
+    test.eq(reason(fn() cli.parse(spec, ["-o", "x", "a", "--count", "x"])), "cli/bad_value")
+    test.eq(
+        message(fn() cli.parse(spec, ["-o", "x", "a", "--ratio", "x"])),
+        "cli: option '--ratio' expects a number, got 'x'",
+    )
+    test.eq(reason(fn() cli.parse(cmds, [])), "cli/no_command")
+    test.eq(reason(fn() cli.parse(cmds, ["push"])), "cli/unknown_command")
+    test.eq(reason(fn() cli.help(cmds, "nope")), "cli/unknown_command")
+})
+
+test.case("a malformed spec or argv is a bug, named at the call", fn() {
+    test.eq(reason(fn() cli.parse("x", [])), "bug/bad_argument")
+    test.eq(reason(fn() cli.parse({ name: "t" }, "a b")), "bug/bad_argument")
+    test.eq(reason(fn() cli.help(42)), "bug/bad_argument")
+    test.eq(reason(fn() cli.help(cmds, 1)), "bug/bad_argument")
+    test.eq(
+        reason(fn() cli.parse({ name: "t", options: [{ name: "x", short: "xy" }] }, [])),
+        "bug/bad_spec",
+    )
+    test.eq(
+        message(fn() cli.parse({ name: "t", options: [{ name: "x", short: "xy" }] }, [])),
+        "bug: cli.parse: option '--x' has short 'xy'; a short name is one character",
+    )
+})
+
+test.case("rest and -- work under a subcommand", fn() {
+    r = cli.parse(cmds, ["add", "p", "q", "--", "-a"])
+    test.eq(r.args, { path: "p" })
+    test.eq(r.rest, ["q", "-a"])
+    test.eq(r.options.all, false)
+})
+
+test.case(
+    "top-level help lists the commands",
+    fn() {
+        test.eq(
+            cli.help(cmds),
+            "vcs - version control\n\nUsage: vcs [options] <command> [args]\n\nOptions:\n      --global    \n      --help    show this help\n\nCommands:\n  add    stage\n  commit    save",
+        )
+    },
+)
+
+test.case("the builder refuses arguments of the wrong type at the call", fn() {
+    test.eq(reason(fn() cli.opt(cli.parser("t"), "n", 5)), "bug/bad_argument")
+    test.eq(message(fn() cli.arg("t", "x")), "bug: cli.arg: spec must be a map, got string")
+    test.eq(reason(fn() cli.flag(cli.parser("t"), 3)), "bug/bad_argument")
 })

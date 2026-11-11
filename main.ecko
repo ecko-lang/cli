@@ -21,14 +21,19 @@
 # `{ options, args, rest, command, help }`, the same help text - checked
 # against the native module, see tests/cli_test.ecko. The 0.x builder
 # functions (`parser`, `flag`, `opt`, `arg`, `usage`) remain, and now build
-# that same spec. Bad input raises `{ kind: "cli", message }`; catch it to
-# print usage and exit. Pure; no capabilities.
+# that same spec. Bad input raises `{ kind: "cli", reason, message }`; catch
+# it to print usage and exit. Pure; no capabilities.
 
 import std.str
 
 # ---- helpers ---------------------------------------------------------------
 
-fn fail(message) = error({ kind: "cli", message: message })
+# Bad input on the command line: the end user's mistake, so its message is
+# written to be printed to them as it stands.
+fn fail(reason, message) = error({ kind: "cli", reason: reason, message: message })
+
+# A mistake in the calling program: a spec or argv of the wrong shape.
+fn bug(reason, message) = error({ kind: "bug", reason: reason, message: message })
 
 fn list_of(spec, key) {
     v = get(spec, key)
@@ -52,21 +57,36 @@ fn find_by(items, key, want) {
     null
 }
 
+# A short name longer than one character could never be matched, so it is
+# refused rather than silently ignored. Commands are checked too.
+fn check_spec(spec, func) {
+    for o in list_of(spec, "options") {
+        short = get(o, "short")
+        if short != null and (type_of(short) != "string" or len(short) != 1) {
+            bug(
+                "bad_spec",
+                "{func}: option '--{text_of(o, "name") ?? ""}' has short '{short}'; a short name is one character",
+            )
+        }
+    }
+    for c in list_of(spec, "commands") {
+        check_spec(c, func)
+    }
+}
+
 # A raw option value, typed by the option's default: an Int default makes it
 # an Int, a Float default a Float, anything else leaves it a String.
 fn coerce(raw, default, name) {
     match type_of(default) {
-        "int" => try { int(trim(raw)) } catch (_) { fail("option '--{name}' expects a whole number, got '{raw}'") }
-        "float" => try { float(trim(raw)) } catch (_) { fail("option '--{name}' expects a number, got '{raw}'") }
+        "int" => try { int(trim(raw)) } catch (_) { fail("bad_value", "option '--{name}' expects a whole number, got '{raw}'") }
+        "float" => try { float(trim(raw)) } catch (_) { fail("bad_value", "option '--{name}' expects a number, got '{raw}'") }
         _ => raw
     }
 }
 
-# Parse `args` against one level of spec: its options and positionals.
-fn parse_flat(spec, args) {
-    opts = list_of(spec, "options")
-    # Every option is present in the result, with its default (a flag's is
-    # false), so `r.options.x` never misses.
+# Every option is present in the result, with its default (a flag's is
+# false), so `r.options.x` never misses.
+fn defaults(opts) {
     mut options = {}
     for o in opts {
         name = text_of(o, "name")
@@ -75,26 +95,49 @@ fn parse_flat(spec, args) {
             options = insert(options, name, if truthy(o, "flag") { d ?? false } else { d })
         }
     }
+    options
+}
+
+# Walk `args` against `opts`, starting from `options`. With `at_command`, it
+# stops at the first positional - the subcommand's name - and `next` is its
+# index; otherwise every token is consumed and positionals are collected.
+fn scan(opts, args, start, at_command) {
+    mut options = start
     mut positionals = []
     mut help = false
     mut i = 0
     n = len(args)
     while i < n {
         tok = args[i]
-        if tok == "--help" or tok == "-h" {
+        if tok == "--help" {
             help = true
             i = i + 1
         } else if tok == "--" {
-            # Everything after `--` is positional.
+            # Everything after `--` is positional; before a subcommand, the
+            # next token is the command.
+            if at_command { return { options: options, positionals: [], help: help, next: i + 1 } }
             positionals = positionals + args[i + 1..]
             i = n
         } else if starts_with(tok, "--") {
             body = tok[2..]
             eq = index_of(body, "=")
             name = if eq >= 0 { body[..eq] } else { body }
-            o = find_by(opts, "name", name) ?? fail("unknown option '--{name}'")
+            mut o = find_by(opts, "name", name)
+            mut value = true
+            if o == null and starts_with(name, "no-") {
+                # `--no-x` turns the flag `x` off; an option literally named
+                # `no-x` was matched first.
+                neg = find_by(opts, "name", name[3..])
+                if neg != null and truthy(neg, "flag") {
+                    o = neg
+                    value = false
+                }
+            }
+            if o == null { fail("unknown_option", "unknown option '--{name}'") }
+            oname = text_of(o, "name")
             if truthy(o, "flag") {
-                options = insert(options, name, true)
+                if eq >= 0 { fail("flag_value", "option '--{name}' is a flag and takes no value") }
+                options = insert(options, oname, value)
                 i = i + 1
             } else {
                 mut raw = null
@@ -104,33 +147,67 @@ fn parse_flat(spec, args) {
                 } else if i + 1 < n {
                     raw = args[i + 1]
                     i = i + 2
-                } else { fail("option '--{name}' needs a value") }
-                options = insert(options, name, coerce(raw, get(o, "default"), name))
+                } else { fail("missing_value", "option '--{name}' needs a value") }
+                options = insert(options, oname, coerce(raw, get(o, "default"), oname))
             }
         } else if len(tok) >= 2 and starts_with(tok, "-") {
-            c = tok[1..2]
-            o = find_by(opts, "short", c) ?? fail("unknown option '-{c}'")
-            name = text_of(o, "name") ?? c
-            if truthy(o, "flag") {
-                options = insert(options, name, true)
-                i = i + 1
-            } else {
-                attached = tok[2..]
-                mut raw = null
-                if attached != "" {
-                    raw = attached
-                    i = i + 1
-                } else if i + 1 < n {
-                    raw = args[i + 1]
-                    i = i + 2
-                } else { fail("option '-{c}' needs a value") }
-                options = insert(options, name, coerce(raw, get(o, "default"), name))
+            # A cluster of short options: `-vn5` is `-v -n 5`. Flags set as
+            # they are read; the first one that takes a value consumes the
+            # rest of the token, or the next argument.
+            mut k = 1
+            mut used = 1
+            while k < len(tok) {
+                c = tok[k..k + 1]
+                o = find_by(opts, "short", c)
+                if o == null {
+                    if c != "h" { fail("unknown_option", "unknown option '-{c}'") }
+                    # `-h` is help unless an option claims it.
+                    help = true
+                    k = k + 1
+                } else {
+                    name = text_of(o, "name") ?? c
+                    if truthy(o, "flag") {
+                        options = insert(options, name, true)
+                        k = k + 1
+                    } else {
+                        attached = tok[k + 1..]
+                        mut raw = null
+                        if attached != "" { raw = attached } else if i + 1 < n {
+                            raw = args[i + 1]
+                            used = 2
+                        } else { fail("missing_value", "option '-{c}' needs a value") }
+                        options = insert(options, name, coerce(raw, get(o, "default"), name))
+                        k = len(tok)
+                    }
+                }
             }
+            i = i + used
         } else {
+            if at_command { return { options: options, positionals: [], help: help, next: i } }
             positionals = push(positionals, tok)
             i = i + 1
         }
     }
+    { options: options, positionals: positionals, help: help, next: n }
+}
+
+fn check_required(opts, options) {
+    for o in opts {
+        if truthy(o, "required") {
+            name = text_of(o, "name") ?? ""
+            if get(options, name) == null {
+                fail("missing_option", "missing required option '--{name}'")
+            }
+        }
+    }
+}
+
+# Parse `args` against one level of spec, seeded with `seed` (a parent's
+# options, which this level's own options of the same name replace).
+fn bind(spec, args, seed) {
+    opts = list_of(spec, "options")
+    s = scan(opts, args, merge(seed, defaults(opts)), false)
+    positionals = s.positionals
     # Positionals bind to the declared args in order; the rest go to `rest`.
     arg_specs = list_of(spec, "args")
     mut named_args = {}
@@ -147,23 +224,26 @@ fn parse_flat(spec, args) {
         idx = idx + 1
     }
     rest = if len(positionals) > len(arg_specs) { positionals[len(arg_specs)..] } else { [] }
-    # `--help` skips validation, so a missing required value cannot hide it.
-    if not help {
-        for o in opts {
-            if truthy(o, "required") {
-                name = text_of(o, "name") ?? ""
-                if get(options, name) == null { fail("missing required option '--{name}'") }
-            }
+    { options: s.options, args: named_args, rest: rest, help: s.help, given: len(positionals) }
+}
+
+fn validate(spec, r) {
+    check_required(list_of(spec, "options"), r.options)
+    mut k = 0
+    for a in list_of(spec, "args") {
+        if truthy(a, "required") and k >= r.given {
+            fail("missing_argument", "missing required argument '<{text_of(a, "name") ?? ""}>'")
         }
-        mut k = 0
-        for a in arg_specs {
-            if truthy(a, "required") and k >= len(positionals) {
-                fail("missing required argument '<{text_of(a, "name") ?? ""}>'")
-            }
-            k = k + 1
-        }
+        k = k + 1
     }
-    { options: options, args: named_args, rest: rest, help: help }
+}
+
+fn result(r, command) = {
+    options: r.options,
+    args: r.args,
+    rest: r.rest,
+    command: command,
+    help: r.help,
 }
 
 fn strings(argv) = map(argv, fn(v) if type_of(v) == "string" { v } else { string(v) })
@@ -175,44 +255,54 @@ fn strings(argv) = map(argv, fn(v) if type_of(v) == "string" { v } else { string
 ##
 ## The spec is `{ name, about?, options?, args?, commands? }`. Each option is
 ## `{ name, short?, flag?, default?, required?, help? }`: `--name value`,
-## `--name=value`, `-s value` and `-svalue` all work, a `flag` takes no value,
-## and the value is an Int or Float when the `default` is one. Each arg is
-## `{ name, required?, help? }`, bound in order; extra positionals, and
-## everything after `--`, land in `rest`. `--help` or `-h` sets `help` and
-## skips validation. With `commands` (a list of specs), the first positional
-## picks one and `command` names it.
+## `--name=value`, `-s value` and `-svalue` all work, and short flags
+## cluster (`-vn5` is `-v -n 5`). A `flag` takes no value; `--no-name` turns
+## it off, for a flag whose default is `true`. The value is an Int or Float
+## when the `default` is one. Each arg is `{ name, required?, help? }`,
+## bound in order; extra positionals, and everything after `--`, land in
+## `rest`. `--help` sets `help` and skips validation, and so does `-h` unless
+## an option declares `short: "h"`. With `commands` (a list of specs), the
+## first positional picks one and `command` names it; the top level's own
+## options go before it and are kept in `options` beside the command's.
 ##
-## Bad input - an unknown option, a missing value, a missing required option
-## or argument, an unknown command - raises `{ kind: "cli", message }`.
+## errors: `cli` with a `reason` for bad input on the command line -
+## `unknown_option`, `flag_value`, `missing_value`, `bad_value`,
+## `missing_option`, `missing_argument`, `no_command`, `unknown_command`;
+## the `message` is written to be shown to the user. `bug`/`bad_argument`
+## when `spec` is not a map or `argv` not a list; `bug`/`bad_spec` when an
+## option's `short` is not one character.
 ##
 ## example:
 ##   r = parse({ name: "x", options: [{ name: "n", default: 1 }] }, ["--n", "3"])
 ##   r.options.n    # 3
 export fn parse(spec, argv) {
-    if type_of(spec) != "map" { fail("cli.parse needs a spec map as its first argument") }
+    if type_of(spec) != "map" {
+        bug("bad_argument", "cli.parse: spec must be a map, got {type_of(spec)}")
+    }
     if type_of(argv) != "list" {
-        fail("cli.parse needs a list of arguments as its second argument")
+        bug("bad_argument", "cli.parse: argv must be a list of strings, got {type_of(argv)}")
     }
+    check_spec(spec, "cli.parse")
     args = strings(argv)
-    if get(spec, "commands") == null { return insert(parse_flat(spec, args), "command", null) }
-    cmds = list_of(spec, "commands")
-    # The first non-option token picks the command; `--help` before it asks
-    # for the top-level help.
-    mut ci = -1
-    mut j = 0
-    for tok in args {
-        if ci < 0 {
-            if tok == "--help" or tok == "-h" {
-                return { options: {}, args: {}, rest: [], command: null, help: true }
-            }
-            if not starts_with(tok, "-") { ci = j }
-        }
-        j = j + 1
+    if get(spec, "commands") == null {
+        r = bind(spec, args, {})
+        if not r.help { validate(spec, r) }
+        return result(r, null)
     }
-    if ci < 0 { fail("no command given") }
-    name = args[ci]
-    sub = find_by(cmds, "name", name) ?? fail("unknown command '{name}'")
-    insert(parse_flat(sub, args[ci + 1..]), "command", name)
+    cmds = list_of(spec, "commands")
+    opts = list_of(spec, "options")
+    # The top level's options come first; the first positional is the command.
+    pre = scan(opts, args, defaults(opts), true)
+    if pre.help { return { options: pre.options, args: {}, rest: [], command: null, help: true } }
+    if pre.next >= len(args) { fail("no_command", "no command given") }
+    name = args[pre.next]
+    sub = find_by(cmds, "name", name) ?? fail("unknown_command", "unknown command '{name}'")
+    r = bind(sub, args[pre.next + 1..], pre.options)
+    if not r.help {
+        check_required(opts, r.options)
+        validate(sub, r)
+    }
+    result(r, name)
 }
 
 # ---- help text -------------------------------------------------------------
@@ -268,14 +358,22 @@ fn help_text(spec) {
 ## the `command` of a `parse` result - for that subcommand's help; `null`
 ## means the top level.
 ##
+## errors: `cli`/`unknown_command` when `command` names no command in the
+## spec; `bug`/`bad_argument` when `spec` is not a map or `command` is
+## neither a string nor `null`.
+##
 ## example:
 ##   if r.help { print(help(spec, r.command)) }
 export fn help(spec, command = null) {
-    if type_of(spec) != "map" { fail("cli.help needs a spec map") }
+    if type_of(spec) != "map" {
+        bug("bad_argument", "cli.help: spec must be a map, got {type_of(spec)}")
+    }
     if command == null { return help_text(spec) }
-    if type_of(command) != "string" { fail("cli.help: the command must be a string") }
+    if type_of(command) != "string" {
+        bug("bad_argument", "cli.help: command must be a string or null, got {type_of(command)}")
+    }
     sub = find_by(list_of(spec, "commands"), "name", command) ??
-        fail("cli.help: unknown command '{command}'")
+        fail("unknown_command", "cli.help: unknown command '{command}'")
     prog = text_of(spec, "name") ?? "program"
     # Rendered as its own spec, named for the program and command together,
     # without the top level's command list.
@@ -286,6 +384,20 @@ export fn help(spec, command = null) {
 
 fn bare(name) = if starts_with(name, "--") { name[2..] } else { name }
 
+# The builder's arguments are checked here, at the call that got them wrong,
+# rather than failing later inside `parse`.
+fn check_builder(func, spec, name, extra) {
+    if type_of(spec) != "map" {
+        bug("bad_argument", "cli.{func}: spec must be a map, got {type_of(spec)}")
+    }
+    if type_of(name) != "string" {
+        bug("bad_argument", "cli.{func}: name must be a string, got {type_of(name)}")
+    }
+    if type_of(extra) != "map" {
+        bug("bad_argument", "cli.{func}: opts must be a map, got {type_of(extra)}")
+    }
+}
+
 fn add(spec, key, item) = insert(spec, key, push(get(spec, key) ?? [], item))
 
 ## Start a spec, to build up with `flag`, `opt` and `arg` and pass to `parse`.
@@ -295,30 +407,49 @@ fn add(spec, key, item) = insert(spec, key, push(get(spec, key) ?? [], item))
 ##   spec = parser("greet", "say hello") |> flag("loud", "shout it")
 export fn parser(name, description = "") = { name: name, about: description, options: [], args: [] }
 
-## Add a boolean flag, `--name`: present means true. A leading `--` on the
-## name is dropped.
+## Add a boolean flag, `--name`: present means true, `--no-name` false. A
+## leading `--` on the name is dropped.
+##
+## errors: `bug`/`bad_argument` when `spec` is not a map or `name` not a string.
 ##
 ## example:
 ##   spec = parser("tool") |> flag("verbose", "print more")
-export fn flag(spec, name, help = "") = add(
-    spec,
-    "options",
-    { name: bare(name), flag: true, help: help },
-)
+export fn flag(spec, name, help = "") {
+    check_builder("flag", spec, name, {})
+    add(spec, "options", { name: bare(name), flag: true, help: help })
+}
 
-## Add an option that takes a value, `--name value`. `opts` may carry `help`,
-## `default`, `required` and `short`; the value's type follows the default.
+## Add an option that takes a value, `--name value`. `opts` is the rest of
+## the option's spec entry - `help`, `default`, `required`, `short` - and the
+## value's type follows the default.
+##
+## errors: `bug`/`bad_argument` when `spec` or `opts` is not a map or `name`
+## not a string.
 ##
 ## example:
 ##   spec = parser("tool") |> opt("count", { default: 1, help: "how many" })
-export fn opt(spec, name, opts = {}) = add(spec, "options", merge(opts, { name: bare(name) }))
+export fn opt(spec, name, opts = {}) {
+    check_builder("opt", spec, name, opts)
+    add(spec, "options", merge(opts, { name: bare(name) }))
+}
 
-## Add a positional argument, bound in declaration order. `opts` may carry
-## `help` and `required`.
+## Add a positional argument, bound in declaration order. `opts` is the rest
+## of the argument's spec entry - `help` and `required`.
+##
+## errors: `bug`/`bad_argument` when `spec` or `opts` is not a map or `name`
+## not a string.
 ##
 ## example:
 ##   spec = parser("tool") |> arg("name", { required: true })
-export fn arg(spec, name, opts = {}) = add(spec, "args", merge(opts, { name: name }))
+export fn arg(spec, name, opts = {}) {
+    check_builder("arg", spec, name, opts)
+    add(spec, "args", merge(opts, { name: name }))
+}
 
 ## The help text for a spec - the same as `help(spec)`, under its 0.x name.
+##
+## errors: `bug`/`bad_argument` when `spec` is not a map.
+##
+## example:
+##   print(usage(parser("tool")))
 export fn usage(spec) = help(spec)
